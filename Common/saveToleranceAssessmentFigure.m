@@ -25,6 +25,9 @@ set(figureHandle,'Color','w','InvertHardcopy','off')
 axesHandles = findall(figureHandle,'-isa','matlab.graphics.axis.Axes');
 for axesIndex = 1:numel(axesHandles)
     axesHandle = axesHandles(axesIndex);
+    if ~isappdata(axesHandle,'PreserveToleranceAxesBackground')
+        axesHandle.Color = 'w';
+    end
     set(axesHandle,'XColor','k','YColor','k','ZColor','k', ...
         'GridColor',[0.75 0.75 0.75], ...
         'MinorGridColor',[0.85 0.85 0.85], ...
