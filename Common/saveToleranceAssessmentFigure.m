@@ -62,7 +62,10 @@ drawnow
 
 figFile = fullfile(inputDir,[stem,'.fig']);
 pngFile = fullfile(inputDir,[stem,'.png']);
+originalVisibility = figureHandle.Visible;
+figureHandle.Visible = 'on';
 savefig(figureHandle,figFile)
+figureHandle.Visible = originalVisibility;
 exportgraphics(figureHandle,pngFile, ...
     'Resolution',300,'BackgroundColor','white')
 

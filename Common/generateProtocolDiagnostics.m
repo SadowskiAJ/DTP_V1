@@ -566,7 +566,12 @@ function saveDiagnosticFigure(figureHandle,inputDir,stem)
 set(figureHandle,'Color','w','InvertHardcopy','off')
 % Save the interactive figure before raster rendering so the MATLAB output
 % is preserved even if a machine's graphics service cannot export a PNG.
+% Diagnostic figures are generated invisibly, but the saved FIG must open
+% visibly when selected later in MATLAB or Windows Explorer.
+originalVisibility = figureHandle.Visible;
+figureHandle.Visible = 'on';
 savefig(figureHandle,fullfile(inputDir,[stem,'.fig']))
+figureHandle.Visible = originalVisibility;
 drawnow
 exportgraphics(figureHandle,fullfile(inputDir,[stem,'.png']), ...
     'Resolution',300,'BackgroundColor','white')
