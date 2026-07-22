@@ -61,3 +61,6 @@ generateProtocolDiagnostics('ReleaseTower',8,53,true)
 
 # Links
 - Sample WTST dataset a.k.a. the 'release tower': https://doi.org/10.6084/m9.figshare.28903136.v1
+
+# Publications
+- Kathirkamanathan L, Sadowski AJ and Seidel M (2026) "Geometric digital twinning of full-scale metal shells of revolution - modelling protocol and buckling-relevant fabrication tolerance assessment" Under review.
