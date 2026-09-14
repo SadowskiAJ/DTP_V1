@@ -43,11 +43,17 @@ usedSpacing = prctile(nearestDistances,95);
 
 % Best-fitting unrotated cone used to centre the nominal reconstruction grid.
 initialRadius = median(RR);
-initial = [mean(XX),mean(YY),initialRadius,initialRadius];
+% Points are already aligned to the tower axis. Their centroid is biased
+% towards the observed side when circumferential coverage is uneven.
+initial = [0,0,initialRadius,initialRadius];
 options = optimoptions('lsqnonlin', 'Display', 'off', ...
     'MaxFunctionEvaluations', 5e5, 'FunctionTolerance', 1e-14, ...
     'StepTolerance', 1e-14, 'MaxIterations', 5000);
-coneParameters = lsqnonlin(@(b) basicCone(b,points), initial, [], [], options);
+[coneParameters,~,~,exitFlag] = lsqnonlin(@(b) basicCone(b,points), initial, [], [], options);
+if exitFlag <= 0 || any(~isfinite(coneParameters))
+    error('S4_GriddedOuterShellSurfaceReconstruction:ConeFitFailed', ...
+        'Strake %g cone fit did not converge (exit flag %g). Review the retained points.',S,exitFlag)
+end
 
 height = topExtent-botExtent;
 nZ = max(2,ceil(height/usedSpacing)+1);
@@ -61,7 +67,7 @@ end
 slope = (coneParameters(4)-coneParameters(3))/(zTwo-zOne);
 intercept = coneParameters(3)-slope*zOne;
 rloc = slope*z+intercept;
-if any(rloc <= 0)
+if any(~isfinite(rloc) | rloc <= 0)
     error('S4_GriddedOuterShellSurfaceReconstruction:InvalidCone', ...
         'The fitted cone produced a nonpositive radius.')
 end
@@ -75,8 +81,10 @@ YNEW = RBIG.*sin(THETg)+coneParameters(2);
 
 searchRadius = usedSpacing*searchRadiusGridSpacingSF;
 queries = [XNEW(:),YNEW(:),Zg(:)];
-gridRadii = inverseDistanceValues(searcher,queries,RR,searchRadius,p,points);
+gridRadii = inverseDistanceValues(searcher,queries,RR,searchRadius,p);
 RBIG = reshape(gridRadii,size(XNEW));
+fprintf('Stage 4 strake %g: %.1f%% of grid nodes unsupported (search radius %.2f mm).\n', ...
+    S,100*nnz(isnan(RBIG))/numel(RBIG),searchRadius)
 
 if plotting
     figure
@@ -108,40 +116,23 @@ if plotting
 end
 end
 
-function values = inverseDistanceValues(searcher,queries,sourceValues,initialRadius,p,points)
+function values = inverseDistanceValues(searcher,queries,sourceValues,radius,p)
 values = nan(size(queries,1),1);
 batchSize = 5000;
-maximumRadius = 2*norm(max(points,[],1)-min(points,[],1));
 for first = 1:batchSize:size(queries,1)
     batch = first:min(first+batchSize-1,size(queries,1));
-    unresolved = (1:numel(batch))';
-    radius = initialRadius;
-    while ~isempty(unresolved)
-        [indices,distances] = rangesearch(searcher,queries(batch(unresolved),:),radius);
-        found = ~cellfun('isempty',indices);
-        foundCellIndices = find(found);
-        for localIndex = 1:numel(foundCellIndices)
-            cellIndex = foundCellIndices(localIndex);
-            resultPosition = unresolved(cellIndex);
-            sourceIndices = indices{cellIndex};
-            sourceDistances = distances{cellIndex};
-            zeroDistance = sourceDistances <= 64*eps(max(1,max(sourceDistances)));
-            if any(zeroDistance)
-                values(batch(resultPosition)) = mean(sourceValues(sourceIndices(zeroDistance)));
-            else
-                weights = 1./sourceDistances(:).^p;
-                values(batch(resultPosition)) = ...
-                    sum(sourceValues(sourceIndices(:)).*weights)/sum(weights);
-            end
-        end
-        unresolved = unresolved(~found);
-        if isempty(unresolved)
-            break
-        end
-        radius = 2*radius;
-        if ~isfinite(radius) || radius > maximumRadius
-            error('S4_GriddedOuterShellSurfaceReconstruction:NeighbourSearchFailed', ...
-                'Unable to find reconstruction neighbours within the point-cloud domain.')
+    % A fixed local support radius leaves unmeasured areas as NaN.
+    [indices,distances] = rangesearch(searcher,queries(batch,:),radius);
+    for cellIndex = find(~cellfun('isempty',indices))'
+        sourceIndices = indices{cellIndex};
+        sourceDistances = distances{cellIndex};
+        zeroDistance = sourceDistances <= 64*eps(max(1,max(sourceDistances)));
+        if any(zeroDistance)
+            values(batch(cellIndex)) = mean(sourceValues(sourceIndices(zeroDistance)));
+        else
+            weights = 1./sourceDistances(:).^p;
+            values(batch(cellIndex)) = ...
+                sum(sourceValues(sourceIndices(:)).*weights)/sum(weights);
         end
     end
 end
@@ -157,8 +148,17 @@ nColumns = size(values,2);
 leftIndices = mod((-halfWidth:-1),nColumns)+1;
 rightIndices = mod((0:halfWidth-1),nColumns)+1;
 extended = [values(:,leftIndices),values,values(:,rightIndices)];
-extended = imgaussfilt(extended,sigma,'FilterSize',filterSize,'Padding','replicate');
+% Normalise by observed support so NaNs do not contaminate nearby data.
+% Restore the original mask afterwards: smoothing must not fill gaps.
+support = isfinite(extended);
+extended(~support) = 0;
+extended = imgaussfilt(extended,sigma,'FilterSize',filterSize,'Padding','replicate', ...
+    'FilterDomain','spatial');
+weights = imgaussfilt(double(support),sigma,'FilterSize',filterSize,'Padding','replicate', ...
+    'FilterDomain','spatial');
+extended = extended./weights;
 filtered = extended(:,halfWidth+(1:nColumns));
+filtered(~isfinite(values)) = NaN;
 end
 
 function perpImp = basicCone(b,x)

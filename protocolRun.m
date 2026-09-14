@@ -14,20 +14,71 @@ clear;
 clc;
 close all;
 
-tower = 'ReleaseTower'; % Tower to be processed
-startFromStage = 1; % Stage to start protocol from - 1 to 7. (3, 4 and 5 run within the same loop). Use 7 to skip to final protocol output.
-randomSeed = 1729; % Reproducible random sampling and global optimisation
-plotting = false; % Diagnostic figures are expensive for full-resolution runs
-generateDiagnostics = true; % Save standard Stage 1, 2, 5 and 6 FIG/PNG diagnostics
-forceDiagnostics = false; % Regenerate diagnostics even when they are newer than their source MAT files
-implementationVersion = 2; % Increment when a code change invalidates cached stages
+%% USER SETTINGS
+% Set these for the dataset before running. The joint count comes from the
+% nominal geometry, as do flange types and the eligible strake selection.
+
+% All stages: dataset, elevation range and restart
+tower = 'ReleaseTower'; % Input_<tower> folder and S0_Data_<tower>.m geometry file
+minZ = -Inf; % [m] -Inf uses the lowest measured elevation
+maxZ = Inf; % [m] Inf uses the highest measured elevation
+startFromStage = 1; % 1--7; stages 3--5 run together. 7 loads completed outputs.
+randomSeed = 1729; % Random sampling and optimisation, all stages
+
+% Diagnostics: all stages
+plotting = false; % Detailed figures during processing; can be slow
+generateDiagnostics = true; % Standard FIG/PNG outputs for stages 1--6
+forceDiagnostics = false; % Rebuild existing standard figures
+units = 'm'; % Stage 1 plot labels; input coordinates must be in metres
+
+% Stage 1: enhanced registration
+registrationFraction = 0.01; % Fraction of each scan retained
+numIter = 5; % Registration iterations
+cutoffReg = 0.02; % [m] Maximum distance for registration correspondences
+registrationIteration = []; % [] selects the best iteration; 1--numIter overrides it for stages 2--6
+
+% Stage 2: radial profile and joint detection
+profileFraction = 0.1; % Fraction of each scan retained
+expectedBeadWidth = 0.08; % [m] Expected weld bead width; also sets Stage 3 window sizes
+numCircWindows = 100; % Circumferential windows for radial correction
+subIntervals = 10; % Vertical subintervals per profile window; at least 2
+jointNominalTolerance = 0.10; % [m] Maximum measured/nominal joint offset; validation only
+jointSearchRadius = 0.10; % [m] Peak search on either side of each nominal joint, clipped at adjacent midpoints
+trimFailedEndJoints = true; % Stage 2: omit missing end junctions; missing interior junctions still stop the run
+% Joint count and flange types come from Z_BOTS and IS_FLANGE in S0_Data_<tower>.m.
+flangePadding = 10; % [mm] Extend fitted flange-joint bounds by this amount
+weldPadding = 5; % [mm] Extend fitted weld bounds by this amount
+
+% Stages 3--6: surface selection and sampling
+% cloudStrakes is automatic: segments with two internal junctions inside the height range.
+% Tower-end segments and segments cut by the height limits are excluded.
+surfaceFraction = 0.02; % Fraction of each scan used for stages 3--5
+
+% Stage 3: outlier removal
+cutOff = 1; % [mm] Point-to-plane outlier threshold
+windowWidthSF = 3; % Window size / expected bead width
+
+% Stage 4: surface reconstruction
+p = 1; % Inverse-distance weighting exponent
+searchRadiusGridSpacingSF = 4; % Fixed search radius / estimated point spacing
+smoothingFilterStd = 10; % Gaussian standard deviation, in grid cells
+
+% Stage 5 uses the Stage 2 joint bounds and the Stage 4 surface.
+% Stage 6 derives mesh spacing from nominal radii, heights and thicknesses.
+% Neither has additional user settings in this script.
+
+% Cache versions: change after numerical implementation changes
+implementationVersion = 2; % All stages
+reconstructionVersion = 4; % Stages 3--6: initialise the local cone fit at the aligned tower axis
+
+%% SETUP
 rng(randomSeed,'twister')
 repoRoot = fileparts(mfilename('fullpath'));
 inputDir = fullfile(repoRoot,['Input_',tower]);
-
-%% Initial set up before registration
-minZ = 8; maxZ = 53; % Range of tower being considered between minZ and maxZ
-units  = 'm'; % Units to be used in plots
+if ~isempty(registrationIteration)
+    validateattributes(registrationIteration,{'numeric'}, ...
+        {'scalar','integer','>=',1,'<=',numIter},mfilename,'registrationIteration')
+end
 
 %% Adding folders to path
 addpath(genpath(fullfile(repoRoot,'Common')))
@@ -39,15 +90,31 @@ addpath(genpath(fullfile(repoRoot,'Stage_4')))
 addpath(genpath(fullfile(repoRoot,'Stage_5')))
 addpath(genpath(fullfile(repoRoot,'Stage_6')))
 
+%% Nominal input data
+clear IS_FLANGE
+run(fullfile(inputDir,['S0_Data_',tower,'.m']))
+if ~exist('IS_FLANGE','var')
+    error('protocolRun:MissingFlangeTypes', ...
+        'Add IS_FLANGE to S0_Data_%s.m: one true/false value per nominal segment. Segment names and thicknesses are not used to infer flange types.',tower)
+end
+if ~((islogical(IS_FLANGE) || isnumeric(IS_FLANGE)) && isreal(IS_FLANGE) && ...
+        isvector(IS_FLANGE) && numel(IS_FLANGE) == numel(Z_BOTS) && ...
+        all(IS_FLANGE(:) == 0 | IS_FLANGE(:) == 1))
+    error('protocolRun:InvalidFlangeTypes', ...
+        'IS_FLANGE in S0_Data_%s.m must be a logical or 0/1 vector with one entry per Z_BOTS segment.',tower)
+end
+isFlange = logical(IS_FLANGE(:)');
+
 %% Create .bin files
 convertPTS2BIN(tower) % Creates .bin files if no .bin files exist in dataset directory
 inputSignature = pointCloudFileSignature(inputDir);
+[minZ,maxZ] = resolveHeightRange(inputDir,minZ,maxZ); % Resolve before fitting or cache checks.
+cloudStrakes = selectCloudStrakes(Z_BOTS,Z_TOPS,minZ,maxZ);
+fprintf('Selected nominal strakes: %s\n',mat2str(cloudStrakes))
+fprintf('Tower-end segments and segments without two in-range junctions are excluded.\n')
 
 %% STAGE 1: ENHANCED REGISTRATION
-% #### Hyperparameters #### %
-nperc = 0.01; % Remaining fraction after downsampling
-numIter = 5; % Number of iterations
-cutoffReg = 0.02; % Cutoff for nearest neighbour [m]
+nperc = registrationFraction;
 s1Cache = fullfile(inputDir,['S1_Registration_',tower,'.mat']);
 stage1Config = struct('stage',1,'implementationVersion',implementationVersion, ...
     'inputSignature',inputSignature,'randomSeed',randomSeed,'minZ',minZ, ...
@@ -68,26 +135,29 @@ else
 end
 
 %% STAGE 2: CAN SEGMENTATION
-% #### Hyperparameters - Global radial profile generation #### %
-nperc = 0.1;
-expectedBeadWidth = 0.08; % m - Setting expected bead width
-numCircWindows = 100; % Number of circumferential windows
-subIntervals = 10; % Number of subIntervals. This controls the window size. Must be at least 2.
-% iUse = 2; % Computed with smallest 99th percentile point to plane metric. Uncomment to overule and manually choose a different iteration
-
-% #### Hyperparameters - Joint ROI identification (Some hyperparameters carry over from global radial profile) #### %
-nJoints = 16; % Number of joints in data
-
-% #### Hyperparameters - Joint segmentation #### %
-flangeTransitionJointIndex = [9]; % Indexes of jointCoordinates where flange-flange joint exists
-flangePadding = 10; % [mm] Amount to extend region identified as flange-flange joint
-weldPadding = 5; % [mm] Amount to extend region identified as welded joint
+% Internal nominal junctions within the selected height range [m].
+nominalJointZ = Z_BOTS(2:end)/1000;
+inRange = nominalJointZ > minZ & nominalJointZ < maxZ;
+% Only the shared boundary of two flange segments is a flange connection.
+nominalFlangeJoint = isFlange(1:end-1) & isFlange(2:end);
+nominalFlangeJoint = nominalFlangeJoint(inRange);
+nominalJointZ = nominalJointZ(inRange);
+nJoints = numel(nominalJointZ);
+fprintf('Stage 2: %g nominal internal junctions in the selected height range.\n',nJoints)
+nperc = profileFraction;
+if ~isempty(registrationIteration)
+    iUse = registrationIteration;
+end
 s2Cache = fullfile(inputDir,['S2_CanSegmentation_',tower,'.mat']);
 stage2Config = struct('stage',2,'implementationVersion',implementationVersion, ...
     'upstream',stage1Config,'nperc',nperc,'expectedBeadWidth',expectedBeadWidth, ...
     'numCircWindows',numCircWindows,'subIntervals',subIntervals,'nJoints',nJoints, ...
-    'flangeTransitionJointIndex',flangeTransitionJointIndex, ...
+    'nominalJointZ',nominalJointZ,'nominalFlangeJoint',nominalFlangeJoint, ...
+    'jointSearchRadius',jointSearchRadius,'trimFailedEndJoints',trimFailedEndJoints, ...
     'flangePadding',flangePadding,'weldPadding',weldPadding);
+if ~isempty(registrationIteration)
+    stage2Config.registrationIteration = registrationIteration;
+end
 
 % If a later start stage is requested and the relevant .mat file exists, load the .mat file, else run the stage
 if startFromStage > 2 && isCompatibleCache(s2Cache,stage2Config)
@@ -106,27 +176,74 @@ else
     
     % Joint ROI identification
     disp('STAGE 2: Joint ROI identification')
-    [jointCoordinates] = S2_JointROIIdentification(ZMEDIANS, RMEDIANS, nJoints, expectedBeadWidth, plotting);
+    [jointCoordinates,jointMatches] = S2_JointROIIdentification( ...
+        ZMEDIANS,RMEDIANS,nJoints,expectedBeadWidth,plotting,nominalJointZ,jointSearchRadius);
+    % Preserve the measured result even if validation rejects it.
+    retainedJoints = retainedJointRun(jointCoordinates,trimFailedEndJoints);
+    detectionConfig = stage2Config;
+    save(fullfile(inputDir,['S2_JointDetection_',tower,'.mat']), ...
+        'ZMEDIANS','RMEDIANS','jointCoordinates','nominalJointZ','jointMatches','retainedJoints','detectionConfig','-v7.3')
+    if generateDiagnostics
+        try
+            generateProtocolDiagnostics(tower,minZ,maxZ,true,2)
+        catch diagnosticError
+            warning('protocolRun:Stage2DiagnosticGenerationFailed', ...
+                'Stage 2 detection data are saved, but plotting failed: %s',diagnosticError.message)
+        end
+    end
+    validateJointDetection(jointCoordinates(retainedJoints),nominalJointZ(retainedJoints),jointNominalTolerance)
+    if nnz(retainedJoints) < 2
+        error('protocolRun:NoCompleteStrakes','At least two valid junctions are needed to bound a strake.')
+    end
+    flangeTransitionJointIndex = matchFlangeJoints( ...
+        jointCoordinates(retainedJoints),nominalJointZ(retainedJoints),nominalFlangeJoint(retainedJoints));
 
     % Joint segmentation
     disp('STAGE 2: Joint segmentation')
-    [JOINTWIDTH, JOINTBOUNDS] = S2_JointSegmentation(ZMEDIANS, RMEDIANS, jointCoordinates, flangeTransitionJointIndex, flangePadding, weldPadding, plotting);
+    [widths,bounds] = S2_JointSegmentation(ZMEDIANS, RMEDIANS, jointCoordinates(retainedJoints), flangeTransitionJointIndex, flangePadding, weldPadding, plotting);
+    % Keep every nominal row, including excluded ends, in saved results.
+    JOINTWIDTH = nan(nJoints,1); JOINTBOUNDS = nan(nJoints,2);
+    JOINTWIDTH(retainedJoints) = widths; JOINTBOUNDS(retainedJoints,:) = bounds;
+    retainedIndices = find(retainedJoints);
+    flangeTransitionJointIndex = retainedIndices(flangeTransitionJointIndex);
     cacheConfig = stage2Config;
-    save(s2Cache,'ZMEDIANS','RMEDIANS','jointCoordinates','JOINTWIDTH','JOINTBOUNDS','cacheConfig','-v7.3');
+    save(s2Cache,'ZMEDIANS','RMEDIANS','jointCoordinates','JOINTWIDTH','JOINTBOUNDS', ...
+        'flangeTransitionJointIndex','nominalJointZ','nominalFlangeJoint','jointMatches','retainedJoints','cacheConfig','-v7.3');
 
     disp('STAGE 2: CAN SEGMENTATION - Complete')
 end
 
 %% Preparing data for looping through cans
-cloudStrakes = 1:15; % Strakes to be meshed from cloud data - Check if within minZ and maxZ
-nperc = 0.02; % Fraction of data to use for remaining stages
-cutOff = 1; % [mm] Stage 3 outlier cutoff distance
-windowWidthSF = 3; % Stage 3 window-width scale factor
-p = 1; % Stage 4 inverse-distance power
-searchRadiusGridSpacingSF = 4; % Stage 4 initial search-radius scale factor
-smoothingFilterStd = 10; % Stage 4 Gaussian standard deviation in grid cells
+% Stage 2 plots must not depend on later stages completing successfully.
+if generateDiagnostics
+    try
+        generateProtocolDiagnostics(tower,minZ,maxZ,forceDiagnostics,2)
+    catch diagnosticError
+        warning('protocolRun:Stage2DiagnosticGenerationFailed', ...
+            'Stage 2 data are saved, but plotting failed: %s',diagnosticError.message)
+    end
+end
+% Check cached results too, before loading the point clouds or surfaces.
+retainedJoints = retainedJointRun(jointCoordinates,trimFailedEndJoints);
+validateJointDetection(jointCoordinates(retainedJoints),nominalJointZ(retainedJoints),jointNominalTolerance)
+[~,boundaryRows] = selectCloudStrakes(Z_BOTS,Z_TOPS,minZ,maxZ);
+availableBoundaries = false(numel(Z_BOTS)+1,1);
+availableBoundaries(boundaryRows(retainedJoints)) = true;
+cloudStrakes = find(availableBoundaries(1:end-1) & availableBoundaries(2:end))';
+if isempty(cloudStrakes)
+    error('protocolRun:NoCompleteStrakes','No strake has two retained junctions.')
+end
+if any(~retainedJoints)
+    fprintf('Stage 2: excluded missing end junctions at nominal elevations %s m.\n',mat2str(nominalJointZ(~retainedJoints)))
+    fprintf('Retained nominal strakes: %s; detected bounding centres %.3f--%.3f m.\n', ...
+        mat2str(cloudStrakes),jointCoordinates(find(retainedJoints,1)),jointCoordinates(find(retainedJoints,1,'last')))
+end
+strakeJointBounds = validateStrakeSelection( ...
+    cloudStrakes,Z_BOTS,Z_TOPS,JOINTBOUNDS,minZ,maxZ,jointNominalTolerance,retainedJoints);
+nperc = surfaceFraction;
 s5Cache = fullfile(inputDir,['S5_Surface_',tower,'.mat']);
 stage5Config = struct('stage',[3,4,5],'implementationVersion',implementationVersion, ...
+    'reconstructionVersion',reconstructionVersion, ...
     'upstream',stage2Config,'randomSeed',randomSeed,'cloudStrakes',cloudStrakes, ...
     'nperc',nperc,'cutOff',cutOff,'windowWidthSF',windowWidthSF,'p',p, ...
     'searchRadiusGridSpacingSF',searchRadiusGridSpacingSF, ...
@@ -148,13 +265,10 @@ else
     % Loading tower details
     run(fullfile(inputDir,['S0_Data_',tower]))
     
-    sel = Z_BOTS/1e3 > minZ & Z_BOTS/1e3 < maxZ;
-    firstStrakeInData = find(sel,1); % ID of first strake in data i.e bottom of which strake is first found in jointCoordinates
-    JOINTBOUNDS = [zeros(firstStrakeInData-1,2); JOINTBOUNDS]; % Adding extra numbers to JOINTBOUNDS to aid indexing and ensure the nth joint corresponds to the nth can if a different region of shell is considered via different minZ and maxZ
     
     % Applying unit conversion of point cloud to mm
     X = X*1000; Y = Y*1000; Z = Z*1000; R = R*1000;
-    JOINTBOUNDS = JOINTBOUNDS*1e3;
+    JOINTBOUNDS = strakeJointBounds*1e3;
     N1 = zeros(size(Z_BOTS));
     N2 = N1;
     diagnosticStrake = cloudStrakes(ceil(numel(cloudStrakes)/2));
@@ -305,6 +419,17 @@ else
     save(s5Cache,'cloudStrakes','CANS','N1','N2','Z_BOTS','Z_TOPS','R0_BOTS','R0_TOPS','THICKS','stageDiagnostics','cacheConfig','-v7.3')
 end
 
+% Produce Stage 5 diagnostics immediately, including the measured cloud.
+if generateDiagnostics
+    try
+        generateProtocolDiagnostics(tower,minZ,maxZ,forceDiagnostics,5)
+    catch diagnosticError
+        warning('protocolRun:Stage5DiagnosticGenerationFailed', ...
+            'Stage 5 outputs are saved, but diagnostic generation failed:\n%s', ...
+            getReport(diagnosticError,'extended','hyperlinks','off'))
+    end
+end
+
 %% STAGE 6: PROJECTION TO ARBITRARY MESHES
 % If a later start stage is requested and the relevant .mat file exists, load the .mat file, else run the stage
 s6Cache = fullfile(inputDir,['S6_Mesh_',tower,'.mat']);
@@ -328,12 +453,12 @@ else
 end
 
 %% STANDARD DIAGNOSTIC FIGURES
-% Generate diagnostics only after every protocol stage is complete so the
-% Stage 6 mesh cache is always available on a fresh run.
+% Stage 5 figures were generated above. Finish the remaining diagnostics now
+% that the Stage 6 mesh cache is available.
 if generateDiagnostics
     disp('STANDARD DIAGNOSTIC FIGURES - Start')
     try
-        generateProtocolDiagnostics(tower,minZ,maxZ,forceDiagnostics)
+        generateProtocolDiagnostics(tower,minZ,maxZ,forceDiagnostics,[1:4 6])
         disp('STANDARD DIAGNOSTIC FIGURES - Complete')
     catch diagnosticError
         warning('protocolRun:DiagnosticGenerationFailed', ...

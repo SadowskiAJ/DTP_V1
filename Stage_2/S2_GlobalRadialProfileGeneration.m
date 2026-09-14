@@ -46,6 +46,7 @@ fprintf('Performing best fit cone correction \n')
 
 % Creating a copy of data to be accessed during loop
 ZCOPY = Z;
+dataMaxZ = max(Z);
 RCOPY = R;
 TCOPY = T;
 
@@ -165,6 +166,14 @@ for j = 1:length(windowCentreZ)
 
         subWindowMedianR(k) = median(R);
 
+    end
+
+    % The extra final window may contain subwindows wholly above the cloud.
+    % Drop only those; retain the regular spacing and reject gaps within it.
+    if j == length(windowCentreZ)
+        beyondData = subWindowEndsZ(1:end-1) > dataMaxZ;
+        subWindowCentreZ(beyondData) = [];
+        subWindowMedianR(beyondData) = [];
     end
 
     if any(isnan(subWindowMedianR))

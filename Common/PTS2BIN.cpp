@@ -1,11 +1,11 @@
-// Copyright (c) 2025, Mr Lijithan Kathirkamanathan and Dr Adam Jan Sadowski
+// Copyright (c) 2026, Dr Lijithan Kathirkamanathan and Dr Adam Jan Sadowski
 // of Imperial College London and Dr Marc Seidel of Siemens Gamesa Renewable
-// Energy.
+// Energy. Developed with OpenAI Codex support.
 
 // Copyright under a BSD 3-Clause License, see
 // https://github.com/SadowskiAJ/DTP_V1.git
 
-// Last modified at 15.47 on 21/07/2026
+// Last modified at 09.38 on 14/09/2026
 
 
 // A simple C++ program to transform the .pts text-based file containing tower coordinates
@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -65,12 +66,47 @@ int main(int argc, char** argv)
 	double x = 0.0, y = 0.0, z = 0.0;
 	std::string sLine;
 	std::uint64_t lineNumber = 0;
+	bool firstRecord = true;
+	bool hasPointCount = false;
+	std::uint64_t expectedPointCount = 0;
 	while (std::getline(ptsFile, sLine))
 	{
 		++lineNumber;
-		if (sLine.empty())
+		// Some exporters prefix the file with a UTF-8 byte-order mark.
+		if (lineNumber == 1 && sLine.compare(0, 3, "\xEF\xBB\xBF") == 0)
+		{
+			sLine.erase(0, 3);
+		}
+		const auto first = sLine.find_first_not_of(" \t\r\n\v\f");
+		if (first == std::string::npos)
 		{
 			continue;
+		}
+
+		// PTS may start with a single unsigned decimal point count. Only
+		// recognise this on the first nonblank line; malformed rows must fail.
+		if (firstRecord)
+		{
+			firstRecord = false;
+			const auto last = sLine.find_last_not_of(" \t\r\n\v\f");
+			const std::string record = sLine.substr(first, last - first + 1);
+			if (record.find_first_not_of("0123456789") == std::string::npos)
+			{
+				hasPointCount = true;
+				for (const char digit : record)
+				{
+					const auto value = static_cast<std::uint64_t>(digit - '0');
+					if (expectedPointCount > (std::numeric_limits<std::uint64_t>::max() - value) / 10)
+					{
+						std::cerr << "Point count out of range on line " << lineNumber << std::endl;
+						BINFile.close();
+						std::remove((sptsFileName + ".bin").c_str());
+						return 4;
+					}
+					expectedPointCount = expectedPointCount * 10 + value;
+				}
+				continue;
+			}
 		}
 
 		std::istringstream isLine(sLine);
@@ -98,6 +134,22 @@ int main(int argc, char** argv)
 		{
 			std::cout << "Read " << unCounter / 1000000 << " million pts rows." << std::endl;
 		}
+	}
+
+	if (ptsFile.bad() || (ptsFile.fail() && !ptsFile.eof()))
+	{
+		std::cerr << "Read failure in " << sptsFileName + ".pts" << std::endl;
+		BINFile.close();
+		std::remove((sptsFileName + ".bin").c_str());
+		return 4;
+	}
+	if (hasPointCount && unCounter != expectedPointCount)
+	{
+		std::cerr << "Point count mismatch: header declares " << expectedPointCount
+			<< " but read " << unCounter << " data points." << std::endl;
+		BINFile.close();
+		std::remove((sptsFileName + ".bin").c_str());
+		return 4;
 	}
 
 	BINFile.seekp(0);

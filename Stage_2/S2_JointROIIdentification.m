@@ -1,4 +1,4 @@
-function [jointCoordinates] = S2_JointROIIdentification(ZMEDIANS, RMEDIANS, nJoints, expectedBeadWidth, plotting)
+function [jointCoordinates,jointMatches] = S2_JointROIIdentification(ZMEDIANS, RMEDIANS, nJoints, expectedBeadWidth, plotting, nominalJointZ, jointSearchRadius)
 
 % Copyright (c) 2026, Dr Lijithan Kathirkamanathan and Dr Adam Jan Sadowski
 % of Imperial College London and Dr Marc Seidel of Siemens Gamesa Renewable
@@ -12,17 +12,20 @@ function [jointCoordinates] = S2_JointROIIdentification(ZMEDIANS, RMEDIANS, nJoi
 if nargin < 5
     plotting = false;
 end
+jointMatches = table();
+useNominalWindows = nargin >= 6;
+if useNominalWindows && (nargin < 7 || numel(nominalJointZ) ~= nJoints)
+    error('S2_JointROIIdentification:InvalidNominalInput', ...
+        'Supply nJoints nominal elevations and a search radius.')
+end
 if numel(ZMEDIANS) < 2 || numel(ZMEDIANS) ~= numel(RMEDIANS)
     error('S2_JointROIIdentification:InvalidProfile', ...
         'The global radial profile must contain at least two coordinate pairs.')
 end
 
-% A gauge is used to work out how much the shell wall deviates from being
-% straight. Data is aggregated using moving maximum window. Local maxima
-% are found. Local maxima are sorted from largest to smallest and knowledge
-% of how many joints there are is used to determine which maxima are joints.
-% The largest local maxima are extracted and can be used for joint
-% segmentation
+% The gauge and moving maximum identify candidate peaks. With nominal
+% elevations supplied, select the strongest candidate in each search window.
+% The original five-argument call retains global peak ranking.
 
 %% Compute length of reference line
 
@@ -122,27 +125,31 @@ end
 
 %% Identifying joints
 
-% ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ PSEUDOCODE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ %
-% Find jointCoordinates, the vertical coordinate of the nJoints largest local maxima of dmax.
-% ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ PSEUDOCODE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ %
-
-% Finding local maxima and sorting into descending order
+% Select from the existing local maxima; do not move or create peaks.
 locMaxVals = peakDeviations(TF);
 locMaxZ = ZMEDIANS(TF);
-[~,I] = sort(locMaxVals, 'descend');
-if numel(I) < nJoints
-    error('S2_JointROIIdentification:InsufficientPeaks', ...
-        'Requested %g joints but only %g local maxima were identified.', nJoints, numel(I))
+if useNominalWindows
+    [jointCoordinates,jointMatches,selected] = selectNominalJointPeaks( ...
+        locMaxZ,locMaxVals,nominalJointZ,jointSearchRadius);
+    selected = selected(selected > 0);
+    fprintf('Nominal joint windows: %g of %g contain a candidate peak.\n', ...
+        nnz(isfinite(jointCoordinates)),nJoints)
+    disp(jointMatches)
+else
+    [~,I] = sort(locMaxVals, 'descend');
+    if numel(I) < nJoints
+        error('S2_JointROIIdentification:InsufficientPeaks', ...
+            'Requested %g joints but only %g local maxima were identified.', nJoints, numel(I))
+    end
+    jointCoordinates = sort(locMaxZ(I(1:nJoints)));
+    selected = I(1:nJoints);
 end
-
-% Allocating first nJoints as the joint centres
-jointCoordinates = sort(locMaxZ(I(1:nJoints)));
 
 if plotting
     figure
     hold on
     plot(ZMEDIANS, peakDeviations)
-    plot(locMaxZ(I(1:nJoints)), locMaxVals(I(1:nJoints)), 'x')
+    plot(locMaxZ(selected), locMaxVals(selected), 'x')
     xlabel('$z$ [m]', 'Interpreter','latex')
     ylabel('Peak deviations [m]', 'Interpreter','latex')
     title('Identified joints', 'Interpreter','latex')

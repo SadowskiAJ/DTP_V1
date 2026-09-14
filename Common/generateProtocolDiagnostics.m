@@ -5,15 +5,22 @@
 % Copyright under a BSD 3-Clause License, see
 % https://github.com/SadowskiAJ/DTP_V1.git
 %
-function generateProtocolDiagnostics(tower,minZ,maxZ,force)
+function generateProtocolDiagnostics(tower,minZ,maxZ,force,stages)
 %GENERATEPROTOCOLDIAGNOSTICS Save standard protocol diagnostics beside inputs.
 %
 % Both interactive MATLAB FIG files and PNG previews are written to the
 % Input_<tower> directory. Existing diagnostics are regenerated only when
 % their source MAT file is newer, unless force is true.
+% Optional stages selects diagnostics without requiring later-stage caches.
 
 if nargin < 4
     force = false;
+end
+if nargin < 5
+    stages = 1:6;
+end
+if ~isnumeric(stages) || isempty(stages) || ~all(ismember(stages(:),1:6))
+    error('generateProtocolDiagnostics:InvalidStages','stages must contain values from 1 to 6.')
 end
 if ~(ischar(tower) || (isstring(tower) && isscalar(tower)))
     error('generateProtocolDiagnostics:InvalidTower','tower must be text.')
@@ -42,21 +49,28 @@ s1Cache = fullfile(inputDir,['S1_Registration_',tower,'.mat']);
 s2Cache = fullfile(inputDir,['S2_CanSegmentation_',tower,'.mat']);
 s5Cache = fullfile(inputDir,['S5_Surface_',tower,'.mat']);
 s6Cache = fullfile(inputDir,['S6_Mesh_',tower,'.mat']);
-requiredCaches = {s1Cache,s2Cache,s5Cache,s6Cache};
+s2PlotCache = s2Cache;
+detectionCache = fullfile(inputDir,['S2_JointDetection_',tower,'.mat']);
+if isfile(detectionCache) && (~isfile(s2Cache) || dir(detectionCache).datenum >= dir(s2Cache).datenum)
+    s2PlotCache = detectionCache;
+end
+cacheDependencies = {{s1Cache,s2Cache},{s2PlotCache},{s1Cache,s2Cache,s5Cache}, ...
+    {s1Cache,s2Cache,s5Cache},{s1Cache,s5Cache},{s6Cache}};
+requiredCaches = unique([cacheDependencies{stages}]);
 missing = requiredCaches(~cellfun(@isfile,requiredCaches));
 if ~isempty(missing)
     error('generateProtocolDiagnostics:MissingCache', ...
         'Required protocol output is missing: %s',missing{1})
 end
 
-if needsRefresh(inputDir,diagnosticStem(1,tower),{s1Cache,s2Cache},force)
+if ismember(1,stages) && needsRefresh(inputDir,diagnosticStem(1,tower),{s1Cache,s2Cache},force)
     plotRegistrationDiagnostic(inputDir,tower,minZ,maxZ,s1Cache,s2Cache)
 end
-if needsRefresh(inputDir,diagnosticStem(2,tower),s2Cache,force)
-    plotSegmentationDiagnostic(inputDir,tower,s2Cache)
+if ismember(2,stages) && needsRefresh(inputDir,diagnosticStem(2,tower),s2PlotCache,force)
+    plotSegmentationDiagnostic(inputDir,tower,s2PlotCache)
 end
-refreshStage3 = needsRefresh(inputDir,diagnosticStem(3,tower),s5Cache,force);
-refreshStage4 = needsRefresh(inputDir,diagnosticStem(4,tower),s5Cache,force);
+refreshStage3 = ismember(3,stages) && needsRefresh(inputDir,diagnosticStem(3,tower),s5Cache,force);
+refreshStage4 = ismember(4,stages) && needsRefresh(inputDir,diagnosticStem(4,tower),s5Cache,force);
 if refreshStage3 || refreshStage4
     stageDiagnostics = loadOrBuildIntermediateDiagnostics( ...
         tower,minZ,maxZ,s1Cache,s2Cache,s5Cache);
@@ -67,10 +81,17 @@ if refreshStage3 || refreshStage4
         plotGriddedSurfaceDiagnostic(inputDir,tower,stageDiagnostics.stage4)
     end
 end
-if needsRefresh(inputDir,diagnosticStem(5,tower),s5Cache,force)
+if ismember(5,stages) && needsRefresh(inputDir,diagnosticStem(5,tower),s5Cache,force)
     plotSurfaceDiagnostic(inputDir,tower,s5Cache)
 end
-if needsRefresh(inputDir,diagnosticStem(6,tower),s6Cache,force)
+pointCloudStem = sprintf('DTP_Diagnostic_Stage5_PointCloud_%s',tower);
+pointFiles = dir(fullfile(inputDir,'*.bin'));
+pointSources = [{s1Cache,s5Cache}, ...
+    arrayfun(@(file) fullfile(file.folder,file.name),pointFiles,'UniformOutput',false)'];
+if ismember(5,stages) && needsRefresh(inputDir,pointCloudStem,pointSources,force)
+    plotPointCloudDiagnostic(inputDir,minZ,maxZ,s1Cache,s5Cache,pointCloudStem)
+end
+if ismember(6,stages) && needsRefresh(inputDir,diagnosticStem(6,tower),s6Cache,force)
     plotMeshDiagnostic(inputDir,tower,s6Cache)
 end
 end
@@ -90,6 +111,9 @@ if ischar(sourceFiles) || (isstring(sourceFiles) && isscalar(sourceFiles))
     sourceFiles = cellstr(sourceFiles);
 end
 sourceTimes = cellfun(@(file) dir(file).datenum,sourceFiles);
+% Refresh captions and plotting changes as well as numerical data.
+codeInfo = dir([mfilename('fullpath'),'.m']);
+sourceTimes(end+1) = codeInfo.datenum;
 figInfo = dir(figFile);
 pngInfo = dir(pngFile);
 tf = min(figInfo.datenum,pngInfo.datenum) < max(sourceTimes);
@@ -200,6 +224,8 @@ ylim(axesHandles(1),commonLimits)
 ylim(axesHandles(2),commonLimits)
 title(layout,sprintf('Registration comparison near z = %.2f m',sliceElevation), ...
     'Color','k','Interpreter','latex')
+diagnosticCaption(layout,{'Colours identify scans in this horizontal slice.', ...
+    'Closer agreement suggests better alignment here; this is not a whole-cloud connectivity check.'})
 saveDiagnosticFigure(figureHandle,inputDir,diagnosticStem(1,tower))
 end
 
@@ -251,7 +277,7 @@ end
 
 function plotSegmentationDiagnostic(inputDir,tower,s2Cache)
 fprintf('Generating Stage 2 segmentation diagnostic.\n')
-s2 = load(s2Cache,'ZMEDIANS','RMEDIANS','jointCoordinates','JOINTBOUNDS');
+s2 = load(s2Cache);
 z = s2.ZMEDIANS(:);
 r = s2.RMEDIANS(:);
 figureHandle = figure('Visible','off','Color','w','Position',[100 100 1200 650]);
@@ -260,10 +286,37 @@ profileHandle = plot(axesHandle,z,1000*(r-median(r,'omitnan')), ...
     'k-','LineWidth',1); hold(axesHandle,'on')
 joints = s2.jointCoordinates(:);
 joints = joints(isfinite(joints) & joints >= min(z) & joints <= max(z));
-bounds = s2.JOINTBOUNDS(:);
+if isfield(s2,'JOINTBOUNDS')
+    bounds = s2.JOINTBOUNDS(:);
+else
+    bounds = [];
+end
 bounds = bounds(isfinite(bounds) & bounds >= min(z) & bounds <= max(z));
 centreHandle = plot(axesHandle,nan,nan,'-','Color',[0.8 0.1 0.1]);
 boundHandle = plot(axesHandle,nan,nan,':','Color',[0.2 0.4 0.8]);
+legendHandles = [profileHandle,centreHandle];
+legendLabels = {'Global radial profile','Detected joint centres'};
+if isfield(s2,'retainedJoints') && any(~s2.retainedJoints) && nnz(s2.retainedJoints) >= 2
+    retainedZ = s2.jointCoordinates(s2.retainedJoints);
+    limits = ylim(axesHandle);
+    endRegions = [min(z),retainedZ(1);retainedZ(end),max(z)];
+    for region = 1:2
+        x = endRegions(region,:);
+        patch(axesHandle,x([1 2 2 1]),limits([1 1 2 2]),[0.8 0.8 0.8], ...
+            'FaceAlpha',0.25,'EdgeColor','none','HandleVisibility','off');
+    end
+    excludedHandle = plot(axesHandle,nan,nan,'s','Color',[0.6 0.6 0.6]);
+    legendHandles(end+1) = excludedHandle;
+    legendLabels{end+1} = 'Outside retained joint span (excluded)';
+end
+if isfield(s2,'nominalJointZ')
+    nominalHandle = plot(axesHandle,nan,nan,'--','Color',[0.3 0.55 0.3]);
+    for elevation = s2.nominalJointZ(:)'
+        xline(axesHandle,elevation,'--','Color',[0.3 0.55 0.3],'LineWidth',0.8);
+    end
+    legendHandles(end+1) = nominalHandle;
+    legendLabels{end+1} = 'Nominal junctions';
+end
 for index = 1:numel(joints)
     xline(axesHandle,joints(index),'Color',[0.8 0.1 0.1],'LineWidth',0.8);
 end
@@ -275,8 +328,17 @@ grid(axesHandle,'on'); box(axesHandle,'on')
 xlabel(axesHandle,'Elevation $z$ [m]','Interpreter','latex')
 ylabel(axesHandle,'Radial profile relative to median [mm]','Interpreter','latex')
 title(axesHandle,'Stage 2 global radial profile and detected joints','Interpreter','latex')
-legendHandle = legend(axesHandle,[profileHandle,centreHandle,boundHandle], ...
-    {'Global radial profile','Joint centres','Joint bounds'},'Location','best', ...
+if isfield(s2,'JOINTBOUNDS')
+    diagnosticCaption(axesHandle,{'Red: detected centres. Blue dotted: fitted bounds. Green dashed: nominal junctions.', ...
+        'Check that the marked joints follow the features in the measured profile.'})
+    legendHandles(end+1) = boundHandle;
+    legendLabels{end+1} = 'Joint bounds';
+else
+    title(axesHandle,'Stage 2 joint detections before validation','Interpreter','latex')
+    diagnosticCaption(axesHandle,{'Red: detected centres. Green dashed: nominal junctions.', ...
+        'These detections are unvalidated; joint bounds have not been fitted.'})
+end
+legendHandle = legend(axesHandle,legendHandles,legendLabels,'Location','best', ...
     'Interpreter','latex');
 set(legendHandle,'Color','w','TextColor','k','EdgeColor',[0.25 0.25 0.25])
 styleAxes(axesHandle)
@@ -312,13 +374,13 @@ configuration = s5.cacheConfig;
     s1.regParams,s1.iUse);
 bestFitParams = bestFitCone(X,Y,Z,minZ,tower,1e6);
 [~,~,Z,T,R] = bestFitConeTransform(X,Y,Z,minZ,bestFitParams,false);
-jointBounds = s2.JOINTBOUNDS;
-firstStrake = find(s5.Z_BOTS/1000 > minZ & s5.Z_BOTS/1000 < maxZ,1);
-if isempty(firstStrake)
-    error('generateProtocolDiagnostics:NoStrakeInRange', ...
-        'No processed strake lies in the requested elevation range.')
+[~,boundaryRows] = selectCloudStrakes(s5.Z_BOTS,s5.Z_TOPS,minZ,maxZ);
+if size(s2.JOINTBOUNDS,1) ~= numel(boundaryRows)
+    error('generateProtocolDiagnostics:InvalidJointMapping', ...
+        'Cached joint bounds do not match nominal boundaries in the selected height range.')
 end
-jointBounds = [zeros(firstStrake-1,2);jointBounds]*1000;
+jointBounds = nan(numel(s5.Z_BOTS)+1,2);
+jointBounds(boundaryRows,:) = s2.JOINTBOUNDS*1000;
 strake = s5.cloudStrakes(ceil(numel(s5.cloudStrakes)/2));
 bottomExtent = jointBounds(strake,2);
 topExtent = jointBounds(strake+1,1);
@@ -391,7 +453,7 @@ afterDeviation = data.radiusAfter-referenceRadius;
 beforeFinite = beforeDeviation(isfinite(beforeDeviation));
 afterFinite = afterDeviation(isfinite(afterDeviation));
 finiteDeviation = abs([beforeFinite(:);afterFinite(:)]);
-colourLimit = max(prctile(finiteDeviation,99),eps);
+colourLimit = diagnosticColourLimit(finiteDeviation);
 
 figureHandle = figure('Visible','off','Color','w','Position',[100 100 1400 600]);
 layout = tiledlayout(figureHandle,1,2,'TileSpacing','compact','Padding','compact');
@@ -420,6 +482,8 @@ retainedCount = diagnosticCount(data.retainedCount,data.strake);
 retained = 100*retainedCount/max(inputCount,1);
 title(layout,sprintf('Stage 3 outlier removal: representative strake %g (%.1f\\%% retained)', ...
     data.strake,retained),'Interpreter','latex','Color','k')
+diagnosticCaption(layout,{'Before and after outlier removal for one strake, using the same colour scale.', ...
+    'Check for loss of coherent measured features as well as removal of scattered points.'})
 saveDiagnosticFigure(figureHandle,inputDir,diagnosticStem(3,tower))
 end
 
@@ -427,7 +491,7 @@ function plotGriddedSurfaceDiagnostic(inputDir,tower,data)
 fprintf('Generating Stage 4 gridded-surface diagnostic.\n')
 deviation = data.radius-median(data.radius,2,'omitnan');
 finiteDeviation = abs(deviation(isfinite(deviation)));
-colourLimit = max(prctile(finiteDeviation,99),eps);
+colourLimit = diagnosticColourLimit(finiteDeviation);
 
 figureHandle = figure('Visible','off','Color','w','Position',[100 100 1400 600]);
 layout = tiledlayout(figureHandle,1,2,'TileSpacing','compact','Padding','compact');
@@ -464,6 +528,8 @@ set(legendHandle,'Color','w','TextColor','k','EdgeColor',[0.25 0.25 0.25])
 styleAxes(axesHandle)
 title(layout,sprintf('Stage 4 gridded outer surface: representative strake %g', ...
     data.strake),'Interpreter','latex','Color','k')
+diagnosticCaption(layout,{'Only nodes with neighbours inside the fixed search radius are reconstructed.', ...
+    'Blank areas have no local support and remain NaN after smoothing.'})
 saveDiagnosticFigure(figureHandle,inputDir,diagnosticStem(4,tower))
 end
 
@@ -476,7 +542,7 @@ for strake = s5.cloudStrakes(:)'
     deviation = radii-median(radii,2,'omitnan');
     allDeviation = [allDeviation; deviation(:)]; %#ok<AGROW>
 end
-colourLimit = max(prctile(abs(allDeviation),99),eps);
+colourLimit = diagnosticColourLimit(allDeviation);
 
 figureHandle = figure('Visible','off','Color','w','Position',[100 100 1250 720]);
 axesHandle = axes(figureHandle); hold(axesHandle,'on')
@@ -495,6 +561,8 @@ xlabel(axesHandle,'$\theta$ [rad]','Interpreter','latex');
 ylabel(axesHandle,'Elevation $z$ [m]','Interpreter','latex')
 title(axesHandle,'Stage 5 reconstructed surface: circumferential radial deviation', ...
     'Interpreter','latex')
+diagnosticCaption(axesHandle,{'Colour shows radial deviation from each row median, not measurement density.', ...
+    'Blank areas remain unsupported; compare with the measured point-cloud figure.'})
 colourBar = colorbar(axesHandle);
 colourBar.Label.String = 'Radial deviation from row median [mm]';
 colourBar.Label.Interpreter = 'latex';
@@ -505,11 +573,70 @@ styleAxes(axesHandle)
 saveDiagnosticFigure(figureHandle,inputDir,diagnosticStem(5,tower))
 end
 
+function plotPointCloudDiagnostic(inputDir,minZ,maxZ,s1Cache,s5Cache,stem)
+fprintf('Generating Stage 5 measured point-cloud diagnostic.\n')
+s1 = load(s1Cache,'regParams','bestFitParamsPreReg','iUse');
+s5 = load(s5Cache,'cacheConfig');
+% Use the registration selected for this surface, including any override.
+if isfield(s5.cacheConfig.upstream,'registrationIteration')
+    s1.iUse = s5.cacheConfig.upstream.registrationIteration;
+end
+files = dir(fullfile(inputDir,'*.bin'));
+if isempty(files)
+    error('generateProtocolDiagnostics:NoClouds','No binary point clouds in %s.',inputDir)
+end
+colours = lines(numel(files));
+figureHandle = figure('Visible','off','WindowStyle','normal','Color','w', ...
+    'Position',[100 100 1400 850]);
+layout = tiledlayout(figureHandle,1,2,'TileSpacing','compact','Padding','compact');
+axes3D = nexttile(layout); hold(axes3D,'on')
+axesUnwrapped = nexttile(layout); hold(axesUnwrapped,'on')
+handles = gobjects(numel(files),1);
+labels = cell(numel(files),1);
+for scan = 1:numel(files)
+    % Deterministic display sample of measured XYZ, before outlier removal
+    % and reconstruction. Keep each scan separate to preserve its identity.
+    [x,y,z] = readBinaryPointSample(fullfile(files(scan).folder,files(scan).name),1,50000);
+    [x,y,z] = bestFitConeTransform(x,y,z,minZ,s1.bestFitParamsPreReg,false);
+    if s1.iUse > 0
+        [x,y,z] = applyRegistrationTransform(x,y,z,s1.regParams,scan,s1.iUse);
+    end
+    selection = z >= minZ & z <= maxZ;
+    x = x(selection); y = y(selection); z = z(selection);
+    [~,labels{scan}] = fileparts(files(scan).name);
+    handles(scan) = scatter3(axes3D,x,y,z,3,colours(scan,:),'filled', ...
+        'DisplayName',labels{scan});
+    scatter(axesUnwrapped,mod(atan2(y,x),2*pi),z,3,colours(scan,:),'filled')
+    fprintf('  %s: %g displayed measured points.\n',labels{scan},numel(z))
+end
+axis(axes3D,'equal'); axis(axes3D,'tight'); view(axes3D,38,24)
+xlabel(axes3D,'$x$ [m]','Interpreter','latex')
+ylabel(axes3D,'$y$ [m]','Interpreter','latex')
+zlabel(axes3D,'Elevation $z$ [m]','Interpreter','latex')
+title(axes3D,'Registered measured points','Interpreter','latex')
+xlim(axesUnwrapped,[0 2*pi]); ylim(axesUnwrapped,[minZ maxZ])
+xlabel(axesUnwrapped,'$\theta$ [rad]','Interpreter','latex')
+ylabel(axesUnwrapped,'Elevation $z$ [m]','Interpreter','latex')
+title(axesUnwrapped,'Measured circumferential coverage','Interpreter','latex')
+for axesHandle = [axes3D axesUnwrapped]
+    grid(axesHandle,'on'); box(axesHandle,'on'); styleAxes(axesHandle)
+end
+legendHandle = legend(axes3D,handles,labels,'Interpreter','none', ...
+    'Orientation','horizontal','NumColumns',min(4,numel(files)));
+legendHandle.Layout.Tile = 'south';
+set(legendHandle,'Color','w','TextColor','k','EdgeColor',[0.25 0.25 0.25])
+title(layout,'Stage 5: measured point cloud by scan position', ...
+    'Interpreter','latex','Color','k')
+diagnosticCaption(layout,{'Registered measurements before outlier removal, sampled to at most 50,000 points per scan.', ...
+    'Colours identify scan files. Use the unwrapped view to inspect gaps hidden on the far side in 3D.'})
+saveDiagnosticFigure(figureHandle,inputDir,stem)
+end
+
 function plotMeshDiagnostic(inputDir,tower,s6Cache)
 fprintf('Generating Stage 6 mesh diagnostic.\n')
 s6 = load(s6Cache,'X_MESH','Y_MESH','Z_MESH','R_MESH');
 deviation = s6.R_MESH-median(s6.R_MESH,2,'omitnan');
-colourLimit = max(prctile(abs(deviation(:)),99),eps);
+colourLimit = diagnosticColourLimit(deviation);
 rows = displayIndices(size(deviation,1),500);
 columns = displayIndices(size(deviation,2),720);
 % Append the first circumferential column only for display, closing the
@@ -529,6 +656,8 @@ xlabel(axesHandle,'$x$ [m]','Interpreter','latex');
 ylabel(axesHandle,'$y$ [m]','Interpreter','latex');
 zlabel(axesHandle,'$z$ [m]','Interpreter','latex')
 title(axesHandle,'Stage 6 projected shell mesh','Interpreter','latex')
+diagnosticCaption(axesHandle,{'The reconstructed surface is interpolated onto the target mesh.', ...
+    'Missing regions remain NaN; a mesh with holes is not a complete shell model.'})
 colourBar = colorbar(axesHandle);
 colourBar.Label.String = 'Radial deviation from row median [mm]';
 colourBar.Label.Interpreter = 'latex';
@@ -537,6 +666,19 @@ colourBar.FontSize = 12;
 colourBar.Color = 'k';
 styleAxes(axesHandle)
 saveDiagnosticFigure(figureHandle,inputDir,diagnosticStem(6,tower))
+end
+
+function diagnosticCaption(target,lines)
+subtitle(target,lines,'Interpreter','none','FontSize',11,'Color',[0.25 0.25 0.25])
+end
+
+function limit = diagnosticColourLimit(values)
+values = abs(values(isfinite(values)));
+if isempty(values)
+    limit = 1; % Allow an entirely unsupported surface to display as empty.
+else
+    limit = max(prctile(values,99),eps);
+end
 end
 
 function indices = displayIndices(count,maximumCount)

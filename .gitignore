@@ -5,3 +5,15 @@
 *.zip
 *.fig
 *.png
+*.code-workspace
+.vscode/
+.history/
+*.vsix
+debug.log
+Input_*
+!Input_ReleaseTower/
+Input_ReleaseTower/*
+!Input_ReleaseTower/*.m
+Towers/*
+Common/tests
+Comparison_*
