@@ -108,13 +108,25 @@ end
 
 if plotting
     figure
-    surf(THET_MESH,Z_MESH,R_MESH)
+    hold on
+    firstRow = 1;
+    for S = cloudStrakes
+        rows = firstRow:firstRow+N2_MESH(S)-1;
+        surf(THET_MESH(rows,:),Z_MESH(rows,:),R_MESH(rows,:))
+        firstRow = rows(end)+1;
+    end
     grid on
     xlabel('$\theta$ [rad]','interpreter','latex')
     ylabel('$z$ [mm]','interpreter','latex')
     zlabel('$\rho$ [mm]','interpreter','latex')
     figure
-    surf(X_MESH,Y_MESH,Z_MESH)
+    hold on
+    firstRow = 1;
+    for S = cloudStrakes
+        rows = firstRow:firstRow+N2_MESH(S)-1;
+        surf(X_MESH(rows,:),Y_MESH(rows,:),Z_MESH(rows,:))
+        firstRow = rows(end)+1;
+    end
     axis equal tight
     grid on
 end

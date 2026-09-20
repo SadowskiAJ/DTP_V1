@@ -107,6 +107,7 @@ end
 % Determine points of local maxima of dmax.
 % ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ PSEUDOCODE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ %
 
+rawDeviations = peakDeviations;
 peakDeviations = movmax(peakDeviations,lgStep);
 TF = islocalmax(peakDeviations);
 
@@ -129,6 +130,20 @@ end
 locMaxVals = peakDeviations(TF);
 locMaxZ = ZMEDIANS(TF);
 if useNominalWindows
+    [jointCoordinates,jointMatches,selected] = selectNominalJointPeaks( ...
+        locMaxZ,locMaxVals,nominalJointZ,jointSearchRadius);
+    % A nearby stronger weld can suppress a flange peak in the moving maximum.
+    % In empty nominal windows only, recover measured positive local peaks.
+    rawPeaks = islocalmax(rawDeviations) & rawDeviations > 0 & isfinite(rawDeviations);
+    for j = find(isnan(jointCoordinates))
+        candidates = rawPeaks & ZMEDIANS(:) > jointMatches.SearchLower_m(j) & ...
+            ZMEDIANS(:) < jointMatches.SearchUpper_m(j);
+        locMaxZ = [locMaxZ(:); reshape(ZMEDIANS(candidates),[],1)];
+        locMaxVals = [locMaxVals(:); rawDeviations(candidates)];
+        if any(candidates)
+            fprintf('Stage 2: recovered an unfiltered peak candidate near nominal %.3f m.\n',nominalJointZ(j))
+        end
+    end
     [jointCoordinates,jointMatches,selected] = selectNominalJointPeaks( ...
         locMaxZ,locMaxVals,nominalJointZ,jointSearchRadius);
     selected = selected(selected > 0);

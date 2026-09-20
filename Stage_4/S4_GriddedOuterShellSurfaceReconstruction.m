@@ -5,8 +5,10 @@
 % Copyright under a BSD 3-Clause License, see
 % https://github.com/SadowskiAJ/DTP_V1.git
 %
-function [THETg, Zg, RBIG] = S4_GriddedOuterShellSurfaceReconstruction(TT_REM, RR_REM, ZZ_REM, botExtent, topExtent, R0_BOTS, R0_TOPS, Z_BOTS, Z_TOPS, THICKS, S, searchRadiusGridSpacingSF, p, smoothingFilterStd, plotting)
+function [THETg, Zg, RBIG, failure] = S4_GriddedOuterShellSurfaceReconstruction(TT_REM, RR_REM, ZZ_REM, botExtent, topExtent, R0_BOTS, R0_TOPS, Z_BOTS, Z_TOPS, THICKS, S, searchRadiusGridSpacingSF, p, smoothingFilterStd, plotting)
 %S4_GRIDDEDOUTERSHELLSURFACERECONSTRUCTION Reconstruct a regular cylindrical surface.
+% An unusable cone returns empty grids and a failure reason for the caller.
+THETg = []; Zg = []; RBIG = []; failure = [];
 
 if nargin < 15
     plotting = false;
@@ -51,8 +53,10 @@ options = optimoptions('lsqnonlin', 'Display', 'off', ...
     'StepTolerance', 1e-14, 'MaxIterations', 5000);
 [coneParameters,~,~,exitFlag] = lsqnonlin(@(b) basicCone(b,points), initial, [], [], options);
 if exitFlag <= 0 || any(~isfinite(coneParameters))
-    error('S4_GriddedOuterShellSurfaceReconstruction:ConeFitFailed', ...
-        'Strake %g cone fit did not converge (exit flag %g). Review the retained points.',S,exitFlag)
+    failure = struct('identifier','S4_GriddedOuterShellSurfaceReconstruction:ConeFitFailed', ...
+        'reason',sprintf('Cone fit did not converge (exit flag %g).',exitFlag));
+    if nargout < 4; warning(failure.identifier,'Strake %g: %s',S,failure.reason); end
+    return
 end
 
 height = topExtent-botExtent;
@@ -68,8 +72,10 @@ slope = (coneParameters(4)-coneParameters(3))/(zTwo-zOne);
 intercept = coneParameters(3)-slope*zOne;
 rloc = slope*z+intercept;
 if any(~isfinite(rloc) | rloc <= 0)
-    error('S4_GriddedOuterShellSurfaceReconstruction:InvalidCone', ...
-        'The fitted cone produced a nonpositive radius.')
+    failure = struct('identifier','S4_GriddedOuterShellSurfaceReconstruction:InvalidCone', ...
+        'reason','The fitted cone produced a nonfinite or nonpositive radius.');
+    if nargout < 4; warning(failure.identifier,'Strake %g: %s',S,failure.reason); end
+    return
 end
 
 nTheta = max(3,ceil(2*pi*min(rloc)/usedSpacing));

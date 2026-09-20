@@ -1,4 +1,4 @@
-function [ZMEDIANS, RMEDIANS] = S2_GlobalRadialProfileGeneration(nperc, minZ, maxZ, bestFitParamsPreReg, regParams, iUse, tower, expectedBeadWidth, numCircWindows, subIntervals, plotting)
+function [ZMEDIANS, RMEDIANS] = S2_GlobalRadialProfileGeneration(nperc, minZ, maxZ, bestFitParamsPreReg, regParams, iUse, tower, expectedBeadWidth, numCircWindows, subIntervals, plotting, trimFailedEndJoints, profileInteriorRange, retainLongestProfileRun)
 
 % Copyright (c) 2026, Dr Lijithan Kathirkamanathan and Dr Adam Jan Sadowski
 % of Imperial College London and Dr Marc Seidel of Siemens Gamesa Renewable
@@ -12,6 +12,21 @@ function [ZMEDIANS, RMEDIANS] = S2_GlobalRadialProfileGeneration(nperc, minZ, ma
 if nargin < 11
     plotting = false;
 end
+if nargin < 12
+    trimFailedEndJoints = false;
+end
+validateattributes(trimFailedEndJoints,{'logical'},{'scalar'})
+if nargin < 14
+    retainLongestProfileRun = false;
+end
+validateattributes(retainLongestProfileRun,{'logical'},{'scalar'})
+if nargin < 13
+    profileInteriorRange = [-Inf Inf];
+end
+validateattributes(profileInteriorRange,{'numeric'},{'real','vector','numel',2,'nonnan'})
+if profileInteriorRange(1) >= profileInteriorRange(2)
+    error('S2_GlobalRadialProfileGeneration:InvalidEndRange','End-trimming regions must not overlap. Reduce profileEndTrimDistance.')
+end
 if subIntervals < 2 || subIntervals ~= floor(subIntervals)
     error('S2_GlobalRadialProfileGeneration:InvalidSubIntervals', ...
         'subIntervals must be an integer of at least two.')
@@ -21,9 +36,8 @@ if numCircWindows < 1 || numCircWindows ~= floor(numCircWindows)
         'numCircWindows must be a positive integer.')
 end
 
-% Code assumes that the point cloud is dense with no gaps such that there
-% will be no empty windows created in the middle of the cloud as this may
-% cause issues in the current implementation.
+% Stitch only consecutive complete windows. Partial processing keeps one
+% continuous profile, since radial offsets cannot be transferred across gaps.
 
 %% Loading data
 fprintf('Loading data\n')
@@ -75,6 +89,9 @@ windowCentreTheta = (windowEndstheta(1:end-1)+windowEndstheta(2:end))/2; % Point
 % Arrays to store global profile
 ZMEDIANS = [];
 RMEDIANS = [];
+gapWindow = []; % An incomplete window after the profile has started.
+skippedWindows = 0;
+longestZ = []; longestR = []; % Keep one continuous region; never join across a gap.
 
 %% Looping through vertical sliding windows
 tic
@@ -176,10 +193,38 @@ for j = 1:length(windowCentreZ)
         subWindowMedianR(beyondData) = [];
     end
 
-    if any(isnan(subWindowMedianR))
+    if isempty(subWindowMedianR) || any(isnan(subWindowMedianR))
+        if trimFailedEndJoints && retainLongestProfileRun
+            if numel(ZMEDIANS) > numel(longestZ)
+                longestZ = ZMEDIANS; longestR = RMEDIANS;
+            end
+            ZMEDIANS = []; RMEDIANS = [];
+            skippedWindows = skippedWindows+1;
+            continue
+        end
+        if trimFailedEndJoints
+            skippedWindows = skippedWindows+1;
+            if subWindowEndsZ(end) <= profileInteriorRange(1)
+                % Discard any isolated usable windows in the lower end region.
+                ZMEDIANS = []; RMEDIANS = []; gapWindow = [];
+            elseif subWindowEndsZ(1) >= profileInteriorRange(2) && isempty(gapWindow)
+                % Stop before the upper-end gap, even if usable windows follow.
+                break
+            end
+            if ~isempty(RMEDIANS) && isempty(gapWindow)
+                gapWindow = j;
+            end
+            continue
+        end
         error('S2_GlobalRadialProfileGeneration:EmptySubwindow', ...
             ['Vertical profile window %g contains an empty subwindow. ', ...
-             'Increase point density or reduce the number of subintervals.'], j)
+             'Increase point density or restrict the height range.'], j)
+    end
+    if ~isempty(gapWindow)
+        error('S2_GlobalRadialProfileGeneration:InteriorGap', ...
+            ['Incomplete profile window %g near %.3f m is followed by usable window %g. ', ...
+             'Only incomplete end windows may be trimmed; interior gaps cannot be stitched.'], ...
+            gapWindow,windowCentreZ(gapWindow),j)
     end
 
     %% Stitching together global profile
@@ -195,7 +240,7 @@ for j = 1:length(windowCentreZ)
     % end for
     % ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ PSEUDOCODE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ %
 
-    if j == 1 % If first vertical window
+    if isempty(RMEDIANS) % First retained vertical window
         ZMEDIANS(end+1:end+length(subWindowCentreZ)) = subWindowCentreZ;
         RMEDIANS(end+1:end+length(subWindowMedianR)) = subWindowMedianR - subWindowMedianR(1);
     else % If any other vertical window
@@ -206,13 +251,26 @@ for j = 1:length(windowCentreZ)
 end
 toc
 
+if trimFailedEndJoints && retainLongestProfileRun && numel(longestZ) > numel(ZMEDIANS)
+    ZMEDIANS = longestZ; RMEDIANS = longestR;
+end
+
 %% Removing bins out of range of data which will contain nans
 RMEDIANS(ZMEDIANS > maxZ) = [];
 ZMEDIANS(ZMEDIANS > maxZ) = [];
 
-if any(isnan(RMEDIANS))
+if numel(RMEDIANS) < 2 || any(isnan(RMEDIANS))
     error('S2_GlobalRadialProfileGeneration:InvalidProfile', ...
-        'Generated profile contains NaNs; increase point density and rerun.')
+        'No usable continuous profile was generated; review point density and the height range.')
+end
+if skippedWindows > 0 && retainLongestProfileRun
+    warning('S2_GlobalRadialProfileGeneration:PartialProfile', ...
+        ['Incomplete coverage: retained the longest continuous profile, %.3f--%.3f m ', ...
+         '(cloud extent %.3f--%.3f m). Data outside this profile are excluded from segmentation; ', ...
+         'gaps have not been filled.'],ZMEDIANS(1),ZMEDIANS(end),min(ZCOPY),dataMaxZ)
+elseif skippedWindows > 0
+    fprintf('Stage 2: trimmed end data; retained profile %.3f--%.3f m.\n', ...
+        ZMEDIANS(1),ZMEDIANS(end))
 end
 
 %% Plotting

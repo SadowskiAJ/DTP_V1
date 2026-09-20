@@ -19,7 +19,7 @@ close all;
 % nominal geometry, as do flange types and the eligible strake selection.
 
 % All stages: dataset, elevation range and restart
-tower = 'ReleaseTower'; % Input_<tower> folder and S0_Data_<tower>.m geometry file
+tower = 'F3'; % Input_<tower> folder and S0_Data_<tower>.m geometry file
 minZ = -Inf; % [m] -Inf uses the lowest measured elevation
 maxZ = Inf; % [m] Inf uses the highest measured elevation
 startFromStage = 1; % 1--7; stages 3--5 run together. 7 loads completed outputs.
@@ -44,7 +44,10 @@ numCircWindows = 100; % Circumferential windows for radial correction
 subIntervals = 10; % Vertical subintervals per profile window; at least 2
 jointNominalTolerance = 0.10; % [m] Maximum measured/nominal joint offset; validation only
 jointSearchRadius = 0.10; % [m] Peak search on either side of each nominal joint, clipped at adjacent midpoints
-trimFailedEndJoints = true; % Stage 2: omit missing end junctions; missing interior junctions still stop the run
+trimFailedEndJoints = true; % Stage 2: allow incomplete end profiles and missing end junctions to be excluded
+retainLongestProfileRun = true; % Stage 2: with end trimming enabled, keep the longest continuous profile; otherwise interior gaps stop
+retainJointRuns = true; % Stage 2: keep separate runs of detected joints; exclude strakes with a missing boundary
+profileEndTrimDistance = 0.5; % [m] Patchy-end allowance when retainLongestProfileRun is false; 0 disables
 % Joint count and flange types come from Z_BOTS and IS_FLANGE in S0_Data_<tower>.m.
 flangePadding = 10; % [mm] Extend fitted flange-joint bounds by this amount
 weldPadding = 5; % [mm] Extend fitted weld bounds by this amount
@@ -69,7 +72,7 @@ smoothingFilterStd = 10; % Gaussian standard deviation, in grid cells
 
 % Cache versions: change after numerical implementation changes
 implementationVersion = 2; % All stages
-reconstructionVersion = 4; % Stages 3--6: initialise the local cone fit at the aligned tower axis
+reconstructionVersion = 6; % Stages 3--6: explicit result for an unusable cone fit
 
 %% SETUP
 rng(randomSeed,'twister')
@@ -149,7 +152,15 @@ if ~isempty(registrationIteration)
     iUse = registrationIteration;
 end
 s2Cache = fullfile(inputDir,['S2_CanSegmentation_',tower,'.mat']);
+validateattributes(profileEndTrimDistance,{'numeric'},{'scalar','real','finite','nonnegative'})
+profileInteriorRange = [-Inf Inf];
+if profileEndTrimDistance > 0
+    profileInteriorRange = [Z_BOTS(1)/1000+profileEndTrimDistance, Z_TOPS(end)/1000-profileEndTrimDistance];
+end
 stage2Config = struct('stage',2,'implementationVersion',implementationVersion, ...
+    'profileVersion',7,'profileInteriorRange',profileInteriorRange, ...
+    'retainJointRuns',retainJointRuns, ...
+    'retainLongestProfileRun',retainLongestProfileRun, ...
     'upstream',stage1Config,'nperc',nperc,'expectedBeadWidth',expectedBeadWidth, ...
     'numCircWindows',numCircWindows,'subIntervals',subIntervals,'nJoints',nJoints, ...
     'nominalJointZ',nominalJointZ,'nominalFlangeJoint',nominalFlangeJoint, ...
@@ -172,14 +183,19 @@ else
 
     % Global radial profile generation 
     disp('STAGE 2: Global radial profile generation ')
-    [ZMEDIANS, RMEDIANS] = S2_GlobalRadialProfileGeneration(nperc, minZ, maxZ, bestFitParamsPreReg, regParams, iUse, tower, expectedBeadWidth, numCircWindows, subIntervals, plotting);
+    [ZMEDIANS, RMEDIANS] = S2_GlobalRadialProfileGeneration(nperc, minZ, maxZ, bestFitParamsPreReg, regParams, iUse, tower, expectedBeadWidth, numCircWindows, subIntervals, plotting, trimFailedEndJoints, profileInteriorRange, retainLongestProfileRun);
     
     % Joint ROI identification
     disp('STAGE 2: Joint ROI identification')
     [jointCoordinates,jointMatches] = S2_JointROIIdentification( ...
         ZMEDIANS,RMEDIANS,nJoints,expectedBeadWidth,plotting,nominalJointZ,jointSearchRadius);
+    if trimFailedEndJoints || retainJointRuns
+        outsideProfile = nominalJointZ < ZMEDIANS(1) | nominalJointZ > ZMEDIANS(end);
+        jointCoordinates(outsideProfile) = NaN;
+        jointMatches{outsideProfile,{'Detected_m','Offset_m','PeakStrength_m'}} = NaN;
+    end
     % Preserve the measured result even if validation rejects it.
-    retainedJoints = retainedJointRun(jointCoordinates,trimFailedEndJoints);
+    retainedJoints = retainedJointRun(jointCoordinates,trimFailedEndJoints,retainJointRuns,nominalFlangeJoint,nominalJointZ);
     detectionConfig = stage2Config;
     save(fullfile(inputDir,['S2_JointDetection_',tower,'.mat']), ...
         'ZMEDIANS','RMEDIANS','jointCoordinates','nominalJointZ','jointMatches','retainedJoints','detectionConfig','-v7.3')
@@ -191,10 +207,10 @@ else
                 'Stage 2 detection data are saved, but plotting failed: %s',diagnosticError.message)
         end
     end
-    validateJointDetection(jointCoordinates(retainedJoints),nominalJointZ(retainedJoints),jointNominalTolerance)
     if nnz(retainedJoints) < 2
         error('protocolRun:NoCompleteStrakes','At least two valid junctions are needed to bound a strake.')
     end
+    validateJointDetection(jointCoordinates(retainedJoints),nominalJointZ(retainedJoints),jointNominalTolerance)
     flangeTransitionJointIndex = matchFlangeJoints( ...
         jointCoordinates(retainedJoints),nominalJointZ(retainedJoints),nominalFlangeJoint(retainedJoints));
 
@@ -224,7 +240,7 @@ if generateDiagnostics
     end
 end
 % Check cached results too, before loading the point clouds or surfaces.
-retainedJoints = retainedJointRun(jointCoordinates,trimFailedEndJoints);
+retainedJoints = retainedJointRun(jointCoordinates,trimFailedEndJoints,retainJointRuns,nominalFlangeJoint,nominalJointZ);
 validateJointDetection(jointCoordinates(retainedJoints),nominalJointZ(retainedJoints),jointNominalTolerance)
 [~,boundaryRows] = selectCloudStrakes(Z_BOTS,Z_TOPS,minZ,maxZ);
 availableBoundaries = false(numel(Z_BOTS)+1,1);
@@ -234,12 +250,18 @@ if isempty(cloudStrakes)
     error('protocolRun:NoCompleteStrakes','No strake has two retained junctions.')
 end
 if any(~retainedJoints)
-    fprintf('Stage 2: excluded missing end junctions at nominal elevations %s m.\n',mat2str(nominalJointZ(~retainedJoints)))
+    fprintf('Stage 2: excluded junctions at nominal elevations %s m (missing peak, flange neighbours or isolated joint).\n',mat2str(nominalJointZ(~retainedJoints)))
     fprintf('Retained nominal strakes: %s; detected bounding centres %.3f--%.3f m.\n', ...
         mat2str(cloudStrakes),jointCoordinates(find(retainedJoints,1)),jointCoordinates(find(retainedJoints,1,'last')))
 end
+runStarts = find(retainedJoints & [true ~retainedJoints(1:end-1)]);
+runEnds = find(retainedJoints & [~retainedJoints(2:end) true]);
+for runIndex = 1:numel(runStarts)
+    fprintf('Stage 2: retained joint run %.3f--%.3f m; only strakes with both boundaries are reconstructed.\n', ...
+        jointCoordinates(runStarts(runIndex)),jointCoordinates(runEnds(runIndex)))
+end
 strakeJointBounds = validateStrakeSelection( ...
-    cloudStrakes,Z_BOTS,Z_TOPS,JOINTBOUNDS,minZ,maxZ,jointNominalTolerance,retainedJoints);
+    cloudStrakes,Z_BOTS,Z_TOPS,JOINTBOUNDS,minZ,maxZ,jointNominalTolerance,retainedJoints,jointCoordinates);
 nperc = surfaceFraction;
 s5Cache = fullfile(inputDir,['S5_Surface_',tower,'.mat']);
 stage5Config = struct('stage',[3,4,5],'implementationVersion',implementationVersion, ...
@@ -338,7 +360,18 @@ else
 
             % STAGE 4: GRIDDED OUTER SURFACE RECONSTRUCTION
             disp('STAGE 4: GRIDDED OUTER SURFACE RECONSTRUCTION - Start')
-            [THETg, Zg, RBIG] = S4_GriddedOuterShellSurfaceReconstruction(TT_REM, RR_REM, ZZ_REM, botExtent, topExtent, R0_BOTS, R0_TOPS, Z_BOTS, Z_TOPS, THICKS, S, searchRadiusGridSpacingSF, p, smoothingFilterStd, plotting);
+            [THETg, Zg, RBIG, reconstructionFailure] = S4_GriddedOuterShellSurfaceReconstruction(TT_REM, RR_REM, ZZ_REM, botExtent, topExtent, R0_BOTS, R0_TOPS, Z_BOTS, Z_TOPS, THICKS, S, searchRadiusGridSpacingSF, p, smoothingFilterStd, plotting);
+            if ~isempty(reconstructionFailure)
+                warning('protocolRun:SkippedStrake', ...
+                    'Stage 4: skipping strake %g (%.3f--%.3f m): %s', ...
+                    S,botExtent/1000,topExtent/1000,reconstructionFailure.reason)
+                stageDiagnostics.stage4.skippedStrakes(S) = reconstructionFailure;
+                cloudStrakes(cloudStrakes == S) = [];
+                N1(S) = 0; N2(S) = 0;
+                CANS.(sprintf('S%g',S)) = struct('THETg',[],'Zg',[],'RBIG',[], ...
+                    'X3D',[],'Y3D',[],'Z3D',[],'N1',0,'N2',0);
+                continue
+            end
             if S == diagnosticStrake
                 diagnosticRows = unique(round(linspace(1,size(RBIG,1),min(size(RBIG,1),300))));
                 diagnosticColumns = unique(round(linspace(1,size(RBIG,2),min(size(RBIG,2),480))));
@@ -417,6 +450,10 @@ else
     end
     cacheConfig = stage5Config;
     save(s5Cache,'cloudStrakes','CANS','N1','N2','Z_BOTS','Z_TOPS','R0_BOTS','R0_TOPS','THICKS','stageDiagnostics','cacheConfig','-v7.3')
+end
+if isempty(cloudStrakes)
+    error('protocolRun:NoReconstructedStrakes', ...
+        'No strakes were reconstructed. Stage 5 saved the exclusion reasons; Stage 6 cannot generate a mesh.')
 end
 
 % Produce Stage 5 diagnostics immediately, including the measured cloud.

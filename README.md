@@ -26,6 +26,8 @@ Both the geometric digital twinning protocol and tolerance algorithms were devel
 3) Review the stage-labelled choices in the initial `USER SETTINGS` section of `protocolRun.m`, then run it to generate a geometric digital twin of the sample WTST. A standard diagnostic for every stage is saved as an interactive MATLAB `.fig` file and a 300-dpi `.png` preview in the same input directory as the point-cloud and cached MAT files. Axes, tick labels, legends and colour bars use MATLAB's LaTeX interpreter.
 4) Run algorithms in the ToleranceAssessment directory to assess buckling-relevant fabrication tolerances of the sample WTST to EN 1993-1-6 (2025).
 
+Diagnostic FIG files are saved with visibility on so they open normally.
+
 # Height range
 `protocolRun.m` defaults to `minZ = -Inf; maxZ = Inf`. Before processing,
 these limits are replaced with the lowest and highest measured elevations
@@ -59,20 +61,52 @@ indices when passed to reconstruction and diagnostics.
 Stage 2 keeps the existing peak calculation and selects the strongest candidate
 within `jointSearchRadius` (metres) of each nominal junction. Search windows
 are clipped at adjacent nominal midpoints so a peak cannot serve two joints.
-A window with no candidate returns `NaN`; no junction is
+A window with no filtered candidate is checked for positive local peaks in
+the unfiltered deviation signal, since a stronger neighbouring weld can
+suppress a flange peak during filtering. If neither supplies a candidate,
+the window returns `NaN`; no junction is
 invented. The saved `jointMatches` table records search bounds, candidate counts,
 selected elevations, offsets and peak strengths. Validation also checks the
 selected elevations using `jointNominalTolerance` (metres), clipped at the same
 midpoints. Before Stage 3, the existing strake assignment must also agree with
-the nominal bounds. Missing bounding joints, including unhandled tower ends,
-stop the run. These checks apply to cached results as well.
+the nominal bounds. Every selected strake must have both bounding joints;
+missing boundaries are never inferred. These checks apply to cached results as well.
 
-With Stage 2's `trimFailedEndJoints = true`, missing junctions at either end
-are excluded and only strakes bounded by the remaining contiguous junctions
-are reconstructed. Missing interior junctions still stop validation. Set the
-flag to `false` to require every junction. Saved arrays retain their nominal
-rows, with `NaN` bounds for excluded ends and a `retainedJoints` mask. The
-Stage 2 diagnostic shades the region outside the retained joint span.
+With Stage 2's `trimFailedEndJoints = true` and `retainLongestProfileRun = true`
+(the defaults), gaps in vertical coverage cause only the longest continuous
+radial profile to be retained. Its height range is reported; other regions
+are excluded, not joined or filled. This permits partial reconstruction when
+the retained region contains valid bounding joints. It does not verify scan
+registration or full circumferential coverage.
+
+`retainJointRuns = true` (default) retains every run of consecutive detected
+nominal junctions within that profile. A missing joint excludes its two
+adjoining strakes; valid runs elsewhere remain usable. Flange connections
+without their neighbouring welds and isolated joints are excluded too.
+Stage 2 shades excluded regions, and Stage 6 plots strakes separately.
+The mesh arrays concatenate selected strakes in `cloudStrakes` order, with
+`N2_MESH` giving each strake's row count; analysts must not connect across
+omitted strakes. This option does not combine disconnected radial profiles.
+
+If a Stage 4 cone fit fails to converge or produces an invalid radius, that
+strake is skipped with a warning. Stage 5 records the reason in
+`stageDiagnostics.stage4.skippedStrakes`; its `cloudStrakes` lists only the
+remaining strakes for meshing. Other errors still stop the run.
+
+With end trimming enabled and `retainLongestProfileRun = false`, incomplete leading or trailing
+radial-profile windows and missing end junctions are excluded.
+`profileEndTrimDistance` (default 0.5 m) also allows patchy coverage near either
+nominal tower end to be discarded, even if usable windows occur beyond a gap.
+Set it to zero to disable this allowance. Profile windows are stitched only
+when consecutive; gaps farther inside the tower still stop the run if usable
+data follow. The retained profile range is reported, and nominal
+junctions outside it are excluded from reconstruction. Only strakes bounded
+by the remaining contiguous junctions
+are reconstructed. With `retainJointRuns = false`, missing interior junctions
+still stop validation. Set both `retainJointRuns` and `trimFailedEndJoints`
+to `false` to require every junction. Saved arrays retain their nominal
+rows, with `NaN` bounds for excluded joints and a `retainedJoints` mask. The
+Stage 2 diagnostic shades the regions outside the retained joint runs.
 
 # Building the point-cloud converter
 `Common/PTS2BIN.exe` must be a native executable for the operating system on

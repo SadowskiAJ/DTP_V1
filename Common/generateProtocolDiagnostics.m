@@ -297,17 +297,20 @@ boundHandle = plot(axesHandle,nan,nan,':','Color',[0.2 0.4 0.8]);
 legendHandles = [profileHandle,centreHandle];
 legendLabels = {'Global radial profile','Detected joint centres'};
 if isfield(s2,'retainedJoints') && any(~s2.retainedJoints) && nnz(s2.retainedJoints) >= 2
-    retainedZ = s2.jointCoordinates(s2.retainedJoints);
+    retained = s2.retainedJoints(:);
+    allJointZ = s2.jointCoordinates(:);
+    runStarts = find(retained & [true;~retained(1:end-1)]);
+    runEnds = find(retained & [~retained(2:end);true]);
     limits = ylim(axesHandle);
-    endRegions = [min(z),retainedZ(1);retainedZ(end),max(z)];
-    for region = 1:2
+    endRegions = [[min(z);allJointZ(runEnds)], [allJointZ(runStarts);max(z)]];
+    for region = 1:size(endRegions,1)
         x = endRegions(region,:);
         patch(axesHandle,x([1 2 2 1]),limits([1 1 2 2]),[0.8 0.8 0.8], ...
             'FaceAlpha',0.25,'EdgeColor','none','HandleVisibility','off');
     end
     excludedHandle = plot(axesHandle,nan,nan,'s','Color',[0.6 0.6 0.6]);
     legendHandles(end+1) = excludedHandle;
-    legendLabels{end+1} = 'Outside retained joint span (excluded)';
+    legendLabels{end+1} = 'Outside retained joint runs (excluded)';
 end
 if isfield(s2,'nominalJointZ')
     nominalHandle = plot(axesHandle,nan,nan,'--','Color',[0.3 0.55 0.3]);
@@ -634,21 +637,24 @@ end
 
 function plotMeshDiagnostic(inputDir,tower,s6Cache)
 fprintf('Generating Stage 6 mesh diagnostic.\n')
-s6 = load(s6Cache,'X_MESH','Y_MESH','Z_MESH','R_MESH');
+s6 = load(s6Cache,'X_MESH','Y_MESH','Z_MESH','R_MESH','cloudStrakes','N2_MESH');
 deviation = s6.R_MESH-median(s6.R_MESH,2,'omitnan');
 colourLimit = diagnosticColourLimit(deviation);
-rows = displayIndices(size(deviation,1),500);
 columns = displayIndices(size(deviation,2),720);
-% Append the first circumferential column only for display, closing the
-% visual seam without altering the protocol mesh or its connectivity.
-xPlot = [s6.X_MESH(rows,columns),s6.X_MESH(rows,1)];
-yPlot = [s6.Y_MESH(rows,columns),s6.Y_MESH(rows,1)];
-zPlot = [s6.Z_MESH(rows,columns),s6.Z_MESH(rows,1)];
-deviationPlot = [deviation(rows,columns),deviation(rows,1)];
-
 figureHandle = figure('Visible','off','Color','w','Position',[100 100 720 1000]);
-axesHandle = axes(figureHandle);
-surf(axesHandle,xPlot/1000,yPlot/1000,zPlot/1000,deviationPlot,'EdgeColor','none');
+axesHandle = axes(figureHandle); hold(axesHandle,'on')
+firstRow = 1;
+for strake = s6.cloudStrakes(:)'
+    rows = firstRow-1+displayIndices(s6.N2_MESH(strake),500);
+    firstRow = firstRow+s6.N2_MESH(strake);
+    % Close the circumferential seam for display; keep strakes separate.
+    xPlot = [s6.X_MESH(rows,columns),s6.X_MESH(rows,1)];
+    yPlot = [s6.Y_MESH(rows,columns),s6.Y_MESH(rows,1)];
+    zPlot = [s6.Z_MESH(rows,columns),s6.Z_MESH(rows,1)];
+    deviationPlot = [deviation(rows,columns),deviation(rows,1)];
+
+    surf(axesHandle,xPlot/1000,yPlot/1000,zPlot/1000,deviationPlot,'EdgeColor','none');
+end
 axis(axesHandle,'equal'); axis(axesHandle,'tight'); box(axesHandle,'on');
 grid(axesHandle,'on'); view(axesHandle,38,24)
 clim(axesHandle,[-colourLimit colourLimit]); colormap(axesHandle,turbo)
@@ -708,13 +714,9 @@ function saveDiagnosticFigure(figureHandle,inputDir,stem)
 set(figureHandle,'Color','w','InvertHardcopy','off')
 % Save the interactive figure before raster rendering so the MATLAB output
 % is preserved even if a machine's graphics service cannot export a PNG.
-% Diagnostic figures are generated invisibly, but the saved FIG must open
-% visibly when selected later in MATLAB or Windows Explorer.
-originalVisibility = figureHandle.Visible;
+% FIG files must open visibly when selected in MATLAB or Explorer.
 figureHandle.Visible = 'on';
 savefig(figureHandle,fullfile(inputDir,[stem,'.fig']))
-figureHandle.Visible = originalVisibility;
-drawnow
 exportgraphics(figureHandle,fullfile(inputDir,[stem,'.png']), ...
     'Resolution',300,'BackgroundColor','white')
 close(figureHandle)

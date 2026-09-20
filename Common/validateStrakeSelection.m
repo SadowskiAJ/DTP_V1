@@ -1,4 +1,4 @@
-function mapped = validateStrakeSelection(strakes,bottoms,tops,bounds,minZ,maxZ,tolerance,retained)
+function mapped = validateStrakeSelection(strakes,bottoms,tops,bounds,minZ,maxZ,tolerance,retained,detected)
 % Place validated internal joints at their nominal boundary indices.
 if nargin < 8
     retained = true(size(bounds,1),1);
@@ -6,10 +6,9 @@ end
 retained = retained(:);
 if numel(retained) ~= size(bounds,1) || ...
         any(~isfinite(bounds(retained,:)),'all') || ...
-        any(~isnan(bounds(~retained,:)),'all') || ...
-        any(diff(find(retained)) ~= 1)
+        any(~isnan(bounds(~retained,:)),'all')
     error('validateStrakeSelection:InvalidRetainedBounds', ...
-        'Retained joint bounds must be finite and contiguous; excluded end bounds must be NaN.')
+        'Retained joint bounds must be finite; excluded joint bounds must be NaN.')
 end
 validateattributes(strakes,{'numeric'},{'vector','nonempty','integer','positive','<=',numel(bottoms)})
 validateattributes(tolerance,{'numeric'},{'real','scalar','finite','positive'})
@@ -36,6 +35,13 @@ end
 mapped = nan(numel(bottoms)+1,2);
 mapped(boundaryRows,:) = bounds;
 centres = mean(mapped,2);
+if nargin >= 9
+    if numel(detected) ~= numel(boundaryRows)
+        error('validateStrakeSelection:InvalidDetection','Detected joints must match the nominal boundary rows.')
+    end
+    % The nominal tolerance applies to detected peaks, not asymmetric ROI midpoints.
+    centres(boundaryRows) = detected(:);
+end
 allowed = min(tolerance,(tops(strakes)-bottoms(strakes))/2);
 bad = ~isfinite(centres(strakes)) | ~isfinite(centres(strakes+1)) | ...
     abs(centres(strakes)-bottoms(strakes)) >= allowed | ...

@@ -1,0 +1,6 @@
+function supported = flangeWeldsSupported(detected,nominal)
+% The flange's neighbouring welds must lie close enough for its local fit.
+supported = all(isfinite(detected)) && ...
+    detected(1) > nominal(1)-(nominal(2)-nominal(1))/2 && ...
+    detected(3) < nominal(3)+(nominal(3)-nominal(2))/2;
+end
